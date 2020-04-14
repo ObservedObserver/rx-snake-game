@@ -5,10 +5,14 @@ import {
   BehaviorSubject,
   Subject,
   Observable,
+  combineLatest,
 } from "rxjs";
 import * as op from "rxjs/operators";
 import { MODES, MODE_SPPED, Pos, DIRECTION_VECTOR, DIRECTIONS } from "../types";
 import { add } from "../lib/math";
+import { throwFood, eatFood } from "../lib/food";
+import { die } from "../lib/judge";
+import { share } from "rxjs/operators";
 
 interface PortProps {
   mode: MODES;
@@ -42,114 +46,157 @@ const userEvents = fromEvent<KeyboardEvent>(document, "keydown").pipe(
   op.map((e) => KEY_MAP[e.key.toUpperCase()])
 );
 
+const INIT_SNAKE: Pos[] = [
+  [20, 10],
+  [20, 11]
+];
+
+const INIT_PLAYGROUND: [Pos, Pos] = [[0, 0], [PLAYGROUND.width, PLAYGROUND.height]];
+
 const Port: React.FC<PortProps> = (props) => {
   const { mode } = props;
-  const [snakeSpace, setSnakeSpace] = useState<Pos[]>([
-    [20, 10],
-    [20, 11],
-    [20, 12],
-  ]);
+  const [snakeSpace, setSnakeSpace] = useState<Pos[]>(INIT_SNAKE);
+  const [foodSpace, setFoodSpace] = useState<Pos>(throwFood(INIT_SNAKE, INIT_PLAYGROUND));
+  const [round, setRound] = useState<number>(1);
 
-  // const subject = useMemo(() => new Subject(), [])
-
-  // useEffect(() => {
-  //   subject.next(props)
-  // }, [props])
-
-  const modeStream = useMemo(() => {
+  const mode$ = useMemo(() => {
     return new BehaviorSubject(mode);
+  }, []);
+
+  const round$ = useMemo(() => {
+    return new BehaviorSubject(round);
   }, []);
 
   const snake$ = useMemo(() => {
     return new BehaviorSubject(snakeSpace);
   }, []);
 
-  // const userControlStream = useMemo(() => {
-  //   return new BehaviorSubject(DIRECTION_VECTOR.left);
-  // }, [])
-
-  // useEffect(() => {
-  //   userEvents.subscribe(direction => {
-  //     userControlStream.next(DIRECTION_VECTOR[direction])
-  //   })
-  // }, [])
+  const food$ = useMemo(() => {
+    return new BehaviorSubject(foodSpace);
+  }, []);
 
   useEffect(() => {
-    modeStream.next(mode);
+    mode$.next(mode);
   }, [mode]);
 
+  // useEffect(() => {
+  //   snake$.next(snakeSpace);
+  // }, [snakeSpace, foodSpace]);
+
+  // useEffect(() => {
+  //   food$.next(foodSpace);
+  // }, [foodSpace, snakeSpace]);
+
+   useEffect(() => {
+     snake$.next(snakeSpace);
+   }, [snakeSpace]);
+
+   useEffect(() => {
+     food$.next(foodSpace);
+   }, [foodSpace]);
+
   useEffect(() => {
-    snake$.next(snakeSpace);
-  }, [snakeSpace]);
+    round$.next(round);
+  }, [round])
 
   useEffect(() => {
     const userControl$ = userEvents.pipe(
+      op.filter(direction => typeof direction !== 'undefined'),
       op.map((direction) => DIRECTION_VECTOR[direction]),
       op.startWith(DIRECTION_VECTOR.left)
     );
 
-    const mode$ = modeStream;
-
-    const nextSnake$ = mode$.pipe(
-      op.map((mode) => {
+    const gameStatus$ = combineLatest(mode$, round$).pipe(
+      op.map(([mode, round]) => {
         const interval$ = interval(1000 / MODE_SPPED[mode]);
-        return interval$.pipe(
-          op.withLatestFrom(userControl$, snake$),
-          op.map(([int, userControl, snake]) => {
-            let head = [...snake[0]] as [number, number];
-            console.log("add", head, snake);
-            head = add(head, userControl);
-            return [head, ...snake.slice(0, -1)];
-          })
-        );
+        return interval$.pipe(op.withLatestFrom(userControl$, snake$, food$));
       }),
-      op.switchAll()
+      op.switchAll(),
+      share()
     );
 
-    // modeStream
-    //   .pipe(op.map((mode) => interval(1000 / MODE_SPPED[mode])))
-    //   .forEach((int) => {
-    //     int.subscribe(() => {
-    //       setSnakeSpace((snake) => {
-    //         let head = [...snake[0]] as [number, number];
-    //         console.log("add", head, userControlStream.getValue());
-    //         head = add(head, userControlStream.getValue());
-    //         return [head, ...snake.slice(0, -1)];
-    //       });
-    //     });
-    //   });
+    const nextSnake$ = gameStatus$.pipe(
+      op.map(([int, userControl, snake, food]) => {
+        let head = [...snake[0]] as [number, number];
+        head = add(head, userControl);
+        let nextSnake = [head, ...snake.slice(0, -1)];
+        if (eatFood(nextSnake, food)) {
+          console.log("snake:eat!");
+          return [head, ...snake];
+        }
+        return nextSnake;
+      }),
+      share(),
+    )
 
-    const subscription = nextSnake$.subscribe(setSnakeSpace);
+    const gameOver$ = nextSnake$.pipe(
+      op.map((snake) => die(snake, INIT_PLAYGROUND))
+    );
 
+    const nextFood$ = nextSnake$.pipe(
+      op.withLatestFrom(food$, gameOver$),
+      op.filter(([snake, food, gameOver]) => !gameOver),
+      op.map(([snake, food, gameOver]) => {
+        if (eatFood(snake, food)) {
+          return throwFood(snake, INIT_PLAYGROUND)
+        }
+        return food
+      })
+    )
+
+    const snakeSubscription = nextSnake$.subscribe(setSnakeSpace);
+    const foodSubscription = nextFood$.subscribe(setFoodSpace);
+    const gameOverSubscription = gameOver$.subscribe(isOver => {
+      if (isOver) {
+        setRound(r => r + 1);
+        setSnakeSpace(INIT_SNAKE);
+      }
+    })
     return () => {
-      subscription.unsubscribe();
+      snakeSubscription.unsubscribe();
+      foodSubscription.unsubscribe();
+      gameOverSubscription.unsubscribe();
     };
   }, []);
 
   return (
-    <div
-      style={{
-        backgroundColor: "yellow",
-        width: PLAYGROUND.width * BLOCK_SIZE,
-        height: PLAYGROUND.height * BLOCK_SIZE,
-      }}
-    >
-      <svg
-        width={PLAYGROUND.width * BLOCK_SIZE}
-        height={PLAYGROUND.height * BLOCK_SIZE}
+    <div>
+      <ul>
+        <li>Rond: {round}</li>
+        <li>Score: {snakeSpace.length}</li>
+      </ul>
+      <div
+        style={{
+          backgroundColor: "yellow",
+          width: PLAYGROUND.width * BLOCK_SIZE,
+          height: PLAYGROUND.height * BLOCK_SIZE,
+        }}
       >
-        <g style={{ fill: "red" }}>
-          {snakeSpace.map((pos, index) => (
+        <svg
+          width={PLAYGROUND.width * BLOCK_SIZE}
+          height={PLAYGROUND.height * BLOCK_SIZE}
+        >
+          <g style={{ fill: "red" }}>
+            {snakeSpace.map((pos, index) => (
+              <rect
+                width={BLOCK_SIZE}
+                height={BLOCK_SIZE}
+                x={pos[0] * BLOCK_SIZE}
+                y={pos[1] * BLOCK_SIZE}
+                key={index}
+              />
+            ))}
+          </g>
+          <g>
             <rect
               width={BLOCK_SIZE}
               height={BLOCK_SIZE}
-              x={pos[0] * BLOCK_SIZE}
-              y={pos[1] * BLOCK_SIZE}
-              key={index}
+              x={foodSpace[0] * BLOCK_SIZE}
+              y={foodSpace[1] * BLOCK_SIZE}
             />
-          ))}
-        </g>
-      </svg>
+          </g>
+        </svg>
+      </div>
     </div>
   );
 };

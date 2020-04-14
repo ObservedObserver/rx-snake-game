@@ -26,3 +26,7 @@ export const DIRECTION_VECTOR: { [key in DIRECTIONS]: [number, number] } = {
 
 
 export type Pos = [number, number];
+
+export type BBox = [Pos, Pos];
+
+export type SnakeSpace = Pos[];
